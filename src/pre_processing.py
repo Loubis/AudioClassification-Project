@@ -1,5 +1,6 @@
 import os
 import sys
+import traceback
 import warnings
 import multiprocessing
 import glob
@@ -13,19 +14,9 @@ import librosa
 
 DATA_SET_PATH = "/datashare/Audio/FMA/data"
 DATA_SET_AUDIO_FILES_SMALL_PATH = DATA_SET_PATH + "/fma_small"
+DATA_SET_AUDIO_FILES_LARGE_PATH = DATA_SET_PATH + "/fma_large"
 DATA_SET_META_DATA_PATH = DATA_SET_PATH + "/fma_metadata/tracks.csv"
 
-
-dict_genres = {
-    "Electronic": 0,
-    "Experimental": 1,
-    "Folk": 2,
-    "Hip-Hop": 3,
-    "Instrumental": 4,
-    "International": 5,
-    "Pop": 6,
-    "Rock": 7,
-}
 
 keep_cols = [("set", "split"), ("set", "subset"), ("track", "genre_top")]
 
@@ -44,31 +35,57 @@ def get_audio_path(audio_dir, track_id):
 
 
 def get_meta_data(data_set):
+    # Genre Dictionairy initialisieren
+    dict_genres = {}
+
+    # CSV Datei einlesen
     print("Loading meta data from fma_metadata/tracks.csv...")
     tracks_csv = pd.read_csv(DATA_SET_META_DATA_PATH, index_col=0, header=[0, 1])
 
+    # CSV Datei auf "keep-cols" reduzieren
     print("Removing uneeded data...")
     tracks_meta = tracks_csv[keep_cols]
-    tracks_meta = tracks_meta[tracks_meta[("set", "subset")] == data_set]
+    if data_set == "small":
+        tracks_meta = tracks_meta[tracks_meta[("set", "subset")] == "small"]
+    elif data_set == "medium":
+        tracks_meta = tracks_meta[tracks_meta[("set", "subset")] == "medium"]
+
     tracks_meta["track_id"] = tracks_meta.index
 
+    # Daten formatieren
     print("Data format:")
     print(tracks_meta.shape, "\n")
 
+    # Genres aller Tracks in Dictionairy speichern
+    genres = tracks_meta[("track", "genre_top")].dropna().unique()
+    for val in genres:
+        dict_genres.update({val: len(dict_genres)})
     print("Containing classes:")
-    print(tracks_meta[("track", "genre_top")].unique(), "\n")
+    print(dict_genres)
 
-    return tracks_meta
+    # Meta Daten und Genre Dictionairy zurückgeben
+    return tracks_meta, dict_genres
 
 
 def create_spectogram(track_id):
-    filename = get_audio_path(DATA_SET_AUDIO_FILES_SMALL_PATH, track_id)
+    ### Load file
+    filename = get_audio_path(DATA_SET_AUDIO_FILES_LARGE_PATH, track_id)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         y, sr = librosa.load(filename)
-    spect = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=2048, hop_length=1024)
+
+    spect = librosa.feature.melspectrogram(y=y, sr=sr,n_fft=2048, hop_length=1024)
     spect = librosa.power_to_db(spect, ref=np.max)
-    return spect.T
+
+    if spect.shape[1] < 512:
+        return None
+
+    # Normalize
+    spect = spect[:, :512]
+    spect = librosa.core.db_to_power(spect, ref=1.0)
+    spect = np.log(spect)
+
+    return spect
 
 
 def create_entry(data):
@@ -76,36 +93,40 @@ def create_entry(data):
     try:
         track_id = int(row["track_id"])
         genre = str(row[("track", "genre_top")])
+        if genre == 'nan':
+            return None
+        
         spect = create_spectogram(track_id)
-
-        # Normalize for small shape differences
-        spect = spect[:512, :]
-
+    
         return spect, dict_genres[genre]
-
+    except KeyboardInterrupt:
+        exit(1)
     except Exception as e:
+        print()
+        print("Couldn't process create_entry: ", str(track_id))
         print(e)
-        print("Couldn't process create_entry: ", index)
+        traceback.print_exc()
 
 
 def create_array(df):
     genres = []
-    x_spect = np.empty((0, 512, 128))
-
-    pool = multiprocessing.Pool(6)
-
+    x_spect = np.empty((0, 128, 512))
+    pool = multiprocessing.Pool(8)
     for data in tqdm.tqdm(
         pool.imap_unordered(create_entry, df.iterrows()), total=df.shape[0], ncols=100
     ):
         try:
-            spect, genre = data
-            x_spect = np.append(x_spect, [spect], axis=0)
-            genres.append(genre)
-        except:
-            print("Couldn't process create_array: ", x_spect.shape[0] + 1)
+            if data is not None and data[0] is not None and data[1] is not None:
+                spect, genre = data
+                x_spect = np.append(x_spect, [spect], axis=0)
+                genres.append(genre)
+
+        except Exception as e:
+            print()
+            print(e)
+            traceback.print_exc()
 
     y_arr = np.array(genres)
-
     return x_spect, y_arr
 
 
@@ -128,104 +149,49 @@ def unison_shuffled_copies(a, b):
 
 
 def preprocess_data(data_set):
-    tracks_meta = get_meta_data(data_set)
-
+    tracks_meta, genres = get_meta_data(data_set)
+    global dict_genres 
+    dict_genres = genres
+    
     print("Splitting into training, validation and test set")
     train = tracks_meta[tracks_meta[("set", "split")] == "training"]
     valid = tracks_meta[tracks_meta[("set", "split")] == "validation"]
     test = tracks_meta[tracks_meta[("set", "split")] == "test"]
     print(train.shape, valid.shape, test.shape, "\n")
-
+    
+    
     print("Creating test data...")
-    x_test, y_test = create_array(test)
-    print("Saving test data to test_arr.npz", "\n")
-    np.savez("test_arr", x_test, y_test)
+    testChunks = splitDataFrameIntoSmaller(test)
+    count = 0
+    for chunk in testChunks:
+        count += 1
+        print("Creating test data for chunk " + str(count) + "...")
+        x_test, y_test = create_array(chunk)
+        print("Saving test data to test_arr_" + str(count) + ".npz", "\n")
+        np.savez(DATA_SET_PATH + "/pre_processed_full/test_arr_" + str(count), x_test, y_test)
 
     print("Creating validation data...")
-    x_valid, y_valid = create_array(valid)
-    print("Saving test data to valid_arr.npz", "\n")
-    np.savez("valid_arr", x_valid, y_valid)
+    validChunks = splitDataFrameIntoSmaller(valid)
+    count = 0
+    for chunk in validChunks:
+        count += 1
+        print("Creating valid data for chunk " + str(count) + "...")
+        x_valid, y_valid = create_array(chunk)
+        print("Saving test data to valid_arr_" + str(count) + ".npz", "\n")
+        np.savez(DATA_SET_PATH + "/pre_processed_full/valid_arr_" + str(count), x_valid, y_valid)
 
     print("Creating train data...")
-    dataChunks = splitDataFrameIntoSmaller(train)
-
+    trainChunks = splitDataFrameIntoSmaller(train)
     count = 0
-    for chunk in dataChunks:
+    for chunk in trainChunks:
         count += 1
         print("Creating train data for chunk " + str(count) + "...")
         x_train, y_train = create_array(chunk)
-        print("Saving test data to train" + str(count) + "_arr.npz", "\n")
-        np.savez("train" + str(count) + "_arr", x_train, y_train)
-
-    ### TODO: dynamic
-    npzfile = np.load("train1_arr.npz")
-    print(npzfile.files)
-    X_train1 = npzfile["arr_0"]
-    y_train1 = npzfile["arr_1"]
-    print(X_train1.shape, y_train1.shape)
-
-    npzfile = np.load("train2_arr.npz")
-    print(npzfile.files)
-    X_train2 = npzfile["arr_0"]
-    y_train2 = npzfile["arr_1"]
-    print(X_train2.shape, y_train2.shape)
-
-    npzfile = np.load("train3_arr.npz")
-    print(npzfile.files)
-    X_train3 = npzfile["arr_0"]
-    y_train3 = npzfile["arr_1"]
-    print(X_train3.shape, y_train3.shape)
-
-    npzfile = np.load("train4_arr.npz")
-    print(npzfile.files)
-    X_train4 = npzfile["arr_0"]
-    y_train4 = npzfile["arr_1"]
-    print(X_train4.shape, y_train4.shape)
-
-    npzfile = np.load("valid_arr.npz")
-    print(npzfile.files)
-    X_valid = npzfile["arr_0"]
-    y_valid = npzfile["arr_1"]
-    print(X_valid.shape, y_valid.shape)
-
-    npzfile = np.load("test_arr.npz")
-    print(npzfile.files)
-    X_test = npzfile["arr_0"]
-    y_test = npzfile["arr_1"]
-    print(X_test.shape, y_test.shape)
-
-    X_train = np.concatenate((X_train1, X_train2, X_train3, X_train4), axis=0)
-    y_train = np.concatenate((y_train1, y_train2, y_train3, y_train4), axis=0)
-    print(X_train.shape, y_train.shape)
-
-    ## Convert y data from scale 0-7
-
-    ### Convert the scale of training data
-    X_train_raw = librosa.core.db_to_power(X_train, ref=1.0)
-    print(np.amin(X_train_raw), np.amax(X_train_raw), np.mean(X_train_raw))
-    X_train_log = np.log(X_train_raw)
-    print(np.amin(X_train_log), np.amax(X_train_log), np.mean(X_train_log))
-
-    X_valid_raw = librosa.core.db_to_power(X_valid, ref=1.0)
-    X_valid_log = np.log(X_valid_raw)
-
-    X_test_raw = librosa.core.db_to_power(X_test, ref=1.0)
-    X_test_log = np.log(X_test_raw)
-
-    X_train, y_train = unison_shuffled_copies(X_train_log, y_train)
-    X_valid, y_valid = unison_shuffled_copies(X_valid_log, y_valid)
-    X_test, y_test = unison_shuffled_copies(X_test_log, y_test)
-
-    print("converting")
-
-    print("Shapes are: ", X_train.shape, X_valid.shape, y_train.shape, y_valid.shape)
-
-    np.savez("shuffled_train", X_train, y_train)
-    np.savez("shuffled_valid", X_valid, y_valid)
-    np.savez("shuffled_test", X_test, y_test)
+        print("Saving test data to train_arr_" + str(count) + ".npz", "\n")
+        np.savez(DATA_SET_PATH + "/pre_processed_full/train_arr_" + str(count), x_train, y_train)
 
     print("Finishd preprocessing", "\n")
 
 
-preprocess_data("small")
+preprocess_data("full")
 
