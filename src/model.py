@@ -155,6 +155,7 @@ def create_classification_block(CNN_Block, BiRNN_Block):
 
 
 def create_parallel_cnn_birnn_model():
+    print("Creating model...")
     Input_Layer = Input((128, 512, 1))
     CNN_Block = create_cnn_block(Input_Layer)
     BiRNN_Block = create_birnn_block(Input_Layer)
@@ -174,10 +175,8 @@ def create_parallel_cnn_birnn_model():
     return model
 
 
-def train_model(x_train, y_train, x_valid, y_valid, x_test, y_test):
-    print("Creating model...")
-    model = create_parallel_cnn_birnn_model()
-
+def train_model(model, x_train, y_train, x_valid, y_valid, x_test, y_test):
+    print("Prepare training...")
     log_time = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
 
     tb_callback = TensorBoard(
@@ -230,16 +229,10 @@ def train_model(x_train, y_train, x_valid, y_valid, x_test, y_test):
     os.mkdir("./logs/" + log_time + "trained_model")
     model.save("./logs/" + log_time + "trained_model")
 
-    return model, history
 
-
-def run():
-    print("Running model...")
-    # load numpy arrays
+def load_datasets():
     print("Loading train, valid and test data")
-
     x_train, y_train, x_valid, y_valid, x_test, y_test = [], [], [], [], [], []
-
 
     for np_name in tqdm.tqdm(glob.glob(DATA_PATH + "train_arr_*.npz"), ncols=100):
         npzfile = np.load(np_name)
@@ -275,11 +268,21 @@ def run():
         spinner.ok("✅ ")
 
     print("Number of train data: " + str(x_train.shape) + " " + str(y_train.shape))
-    print("Number of train data: " + str(x_valid.shape) + " " + str(y_valid.shape))
-    print("Number of train data: " + str(x_test.shape) + " " + str(y_test.shape))
+    print("Number of valid data: " + str(x_valid.shape) + " " + str(y_valid.shape))
+    print("Number of test data: " + str(x_test.shape) + " " + str(y_test.shape))
+
+    return x_train, y_train, x_valid, y_valid, x_test, y_test
+
+def run():
+    print("Running model.py...")
+    # load numpy arrays
+    x_train, y_train, x_valid, y_valid, x_test, y_test = load_datasets()
+
+    # Create model
+    model = create_parallel_cnn_birnn_model()
 
     # start training
-    model, history = train_model(x_train, y_train, x_valid, y_valid, x_test, y_test)
+    train_model(model, x_train, y_train, x_valid, y_valid, x_test, y_test)
 
 
 if __name__ == "__main__":
