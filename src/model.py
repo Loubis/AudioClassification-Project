@@ -273,6 +273,7 @@ def load_datasets():
 
     return x_train, y_train, x_valid, y_valid, x_test, y_test
 
+
 def run():
     print("Running model.py...")
     # load numpy arrays
